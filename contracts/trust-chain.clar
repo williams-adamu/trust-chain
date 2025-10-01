@@ -396,3 +396,99 @@
         }
     )
 )
+
+(define-read-only (get-company-stats (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (ok {
+            company-name: (get company-name company-info),
+            registration-date: (get registration-date company-info),
+            is-active: (get is-active company-info),
+            monthly-limit: (get monthly-limit company-info),
+            used-this-month: (get used-this-month company-info),
+            remaining-this-month: (- (get monthly-limit company-info)
+                (get used-this-month company-info)
+            ),
+            last-reset: (get last-reset company-info),
+            days-until-reset: (- u4320 (- stacks-block-height (get last-reset company-info))),
+        })
+        ERR-NOT-FOUND
+    )
+)
+
+(define-read-only (credential-exists (token-id uint))
+    (is-some (map-get? credential-data { token-id: token-id }))
+)
+
+(define-read-only (get-revocation-info (token-id uint))
+    (map-get? revocation-data { token-id: token-id })
+)
+
+(define-read-only (batch-verify-credentials (token-ids (list 20 uint)))
+    (map is-credential-valid token-ids)
+)
+
+(define-read-only (get-company-issued-count (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (ok (get used-this-month company-info))
+        ERR-NOT-FOUND
+    )
+)
+
+;; UTILITY FUNCTIONS
+
+(define-read-only (get-contract-info)
+    {
+        version: "1.0.0",
+        name: "TrustChain",
+        description: "Immutable Professional Credentials Protocol",
+        total-credentials: (var-get last-token-id),
+        contract-paused: (var-get contract-paused),
+        contract-owner: CONTRACT-OWNER,
+    }
+)
+
+(define-read-only (validate-credential-data
+        (credential-type (string-ascii 50))
+        (role-title (string-ascii 100))
+        (skills (list 10 (string-ascii 50)))
+        (metadata-uri (string-ascii 256))
+    )
+    (and
+        (> (len credential-type) u0)
+        (> (len role-title) u0)
+        (> (len metadata-uri) u0)
+        (<= (len skills) u10)
+    )
+)
+
+(define-read-only (get-time-until-reset (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (let ((time-since-reset (- stacks-block-height (get last-reset company-info))))
+            (if (>= time-since-reset u4320)
+                u0
+                (- u4320 time-since-reset)
+            )
+        )
+        u0
+    )
+)
+
+(define-read-only (is-contract-owner (principal principal))
+    (is-eq principal CONTRACT-OWNER)
+)
+
+(define-read-only (get-credential-summary (token-id uint))
+    (match (map-get? credential-data { token-id: token-id })
+        credential-info (ok {
+            token-id: token-id,
+            credential-type: (get credential-type credential-info),
+            role-title: (get role-title credential-info),
+            company-name: (get company-name credential-info),
+            issue-date: (get issue-date credential-info),
+            is-valid: (is-credential-valid token-id),
+            is-revoked: (get is-revoked credential-info),
+            recipient: (get recipient credential-info),
+        })
+        ERR-NOT-FOUND
+    )
+)
