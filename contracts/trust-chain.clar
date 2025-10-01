@@ -192,3 +192,207 @@
         (ok token-id)
     )
 )
+
+;; CREDENTIAL REVOCATION
+
+(define-public (revoke-credential
+        (token-id uint)
+        (reason (string-ascii 256))
+    )
+    (let ((credential-info (unwrap! (map-get? credential-data { token-id: token-id }) ERR-NOT-FOUND)))
+        (asserts! (not (get-contract-paused)) ERR-NOT-AUTHORIZED)
+        (asserts!
+            (or
+                (is-eq tx-sender (get issuer credential-info))
+                (is-eq tx-sender CONTRACT-OWNER)
+            )
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (not (get is-revoked credential-info)) ERR-ALREADY-EXISTS)
+
+        ;; Mark credential as revoked
+        (map-set credential-data { token-id: token-id }
+            (merge credential-info { is-revoked: true })
+        )
+
+        ;; Create audit trail
+        (map-set revocation-data { token-id: token-id } {
+            revoked-by: tx-sender,
+            revocation-date: stacks-block-height,
+            reason: reason,
+        })
+
+        (ok true)
+    )
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-contract-paused)
+    (var-get contract-paused)
+)
+
+(define-read-only (is-company-authorized (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (get is-active company-info)
+        false
+    )
+)
+
+(define-read-only (can-issue-credential (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (let ((reset-needed (> (- stacks-block-height (get last-reset company-info)) u4320)))
+            (if reset-needed
+                true
+                (< (get used-this-month company-info)
+                    (get monthly-limit company-info)
+                )
+            )
+        )
+        false
+    )
+)
+
+(define-read-only (get-company-name (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (get company-name company-info)
+        "Unknown Company"
+    )
+)
+
+(define-read-only (get-credential-info (token-id uint))
+    (map-get? credential-data { token-id: token-id })
+)
+
+(define-read-only (get-company-info (company principal))
+    (map-get? authorized-companies { company: company })
+)
+
+(define-read-only (is-credential-valid (token-id uint))
+    (match (map-get? credential-data { token-id: token-id })
+        credential-info (let ((is-not-revoked (not (get is-revoked credential-info))))
+            (match (get expiry-date credential-info)
+                exp-date
+                (and is-not-revoked (< stacks-block-height exp-date))
+                is-not-revoked
+            )
+        )
+        false
+    )
+)
+
+(define-read-only (get-employee-credential-count (employee principal))
+    (default-to u0
+        (get credential-count
+            (map-get? employee-credentials { employee: employee })
+        ))
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+(define-private (update-company-usage (company principal))
+    (match (map-get? authorized-companies { company: company })
+        company-info (let ((reset-needed (> (- stacks-block-height (get last-reset company-info)) u4320)))
+            (if reset-needed
+                ;; Reset counter for new monthly period
+                (map-set authorized-companies { company: company }
+                    (merge company-info {
+                        used-this-month: u1,
+                        last-reset: stacks-block-height,
+                    })
+                )
+                ;; Increment usage counter
+                (map-set authorized-companies { company: company }
+                    (merge company-info { used-this-month: (+ (get used-this-month company-info) u1) })
+                )
+            )
+        )
+        false
+    )
+)
+
+(define-private (update-employee-count (employee principal))
+    (let ((current-count (get-employee-credential-count employee)))
+        (map-set employee-credentials { employee: employee } { credential-count: (+ current-count u1) })
+    )
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+(define-public (set-contract-paused (paused bool))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (var-set contract-paused paused)
+        (ok paused)
+    )
+)
+
+(define-public (update-company-status
+        (company principal)
+        (is-active bool)
+    )
+    (let ((company-info (unwrap! (map-get? authorized-companies { company: company })
+            ERR-NOT-FOUND
+        )))
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (map-set authorized-companies { company: company }
+            (merge company-info { is-active: is-active })
+        )
+        (ok is-active)
+    )
+)
+
+(define-public (update-company-limit
+        (company principal)
+        (new-limit uint)
+    )
+    (let ((company-info (unwrap! (map-get? authorized-companies { company: company })
+            ERR-NOT-FOUND
+        )))
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (> new-limit u0) ERR-INVALID-CREDENTIAL)
+        (map-set authorized-companies { company: company }
+            (merge company-info { monthly-limit: new-limit })
+        )
+        (ok new-limit)
+    )
+)
+
+(define-public (admin-revoke-credential
+        (token-id uint)
+        (reason (string-ascii 256))
+    )
+    (let ((credential-info (unwrap! (map-get? credential-data { token-id: token-id }) ERR-NOT-FOUND)))
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get is-revoked credential-info)) ERR-ALREADY-EXISTS)
+
+        ;; Mark credential as revoked
+        (map-set credential-data { token-id: token-id }
+            (merge credential-info { is-revoked: true })
+        )
+
+        ;; Store revocation data
+        (map-set revocation-data { token-id: token-id } {
+            revoked-by: tx-sender,
+            revocation-date: stacks-block-height,
+            reason: reason,
+        })
+
+        (ok true)
+    )
+)
+
+;; ADVANCED QUERY FUNCTIONS
+
+(define-read-only (get-credentials-by-recipient
+        (recipient principal)
+        (limit uint)
+        (offset uint)
+    )
+    (let ((recipient-count (get-employee-credential-count recipient)))
+        {
+            total-count: recipient-count,
+            has-more: (> recipient-count (+ offset limit)),
+        }
+    )
+)
